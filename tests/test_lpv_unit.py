@@ -334,3 +334,117 @@ class TestMainLogic:
                 result = lpv.main()
 
         assert result == 1
+
+    def test_render_progress_bar_fallback(self):
+        """Test _render_progress_bar falls back to stream mode when total_lines is None."""
+        progress = lpv.ProgressDisplay(None, 0.1, False, None, True, 80)
+        progress.lines_processed = 42
+        # Call _render_progress_bar which should fall back to _render_stream_mode
+        output = progress._render_progress_bar(10.0)
+        assert "42 lines" in output
+        assert "elapsed:" in output
+
+    def test_finalize_early_return(self):
+        """Test finalize returns early when show_progress is False."""
+        progress = lpv.ProgressDisplay(100, 0.1, False, None, False, 80)
+        progress.show_progress = False
+        progress.lines_processed = 50
+
+        # Should return early without writing anything
+        with patch('sys.stderr.write') as mock_write:
+            progress.finalize()
+
+        # Should not have been called
+        assert not mock_write.called
+
+    def test_process_stream_broken_pipe(self):
+        """Test process_stream handles BrokenPipeError gracefully."""
+        input_stream = io.BytesIO(b"line1\nline2\nline3\n")
+
+        # Mock output stream that raises BrokenPipeError
+        output_stream = MagicMock()
+        output_stream.write.side_effect = BrokenPipeError()
+
+        progress = lpv.ProgressDisplay(None, 0.1, False, None, True, 80)
+
+        # Should not raise, just exit gracefully
+        lpv.process_stream(input_stream, output_stream, progress)
+
+    def test_process_stream_keyboard_interrupt(self):
+        """Test process_stream handles KeyboardInterrupt and exits with 130."""
+        input_stream = io.BytesIO(b"line1\nline2\nline3\n")
+
+        # Mock output stream that raises KeyboardInterrupt on second write
+        output_stream = MagicMock()
+        call_count = [0]
+
+        def raise_on_second(*args):
+            call_count[0] += 1
+            if call_count[0] == 2:
+                raise KeyboardInterrupt()
+
+        output_stream.write.side_effect = raise_on_second
+
+        progress = lpv.ProgressDisplay(None, 0.1, False, None, True, 80)
+
+        # Should catch KeyboardInterrupt, call finalize, and exit with 130
+        with patch.object(progress, 'finalize') as mock_finalize:
+            with patch('sys.exit') as mock_exit:
+                lpv.process_stream(input_stream, output_stream, progress)
+                assert mock_finalize.called
+                mock_exit.assert_called_once_with(130)
+
+    def test_main_stdin_processing(self):
+        """Test main processes stdin correctly."""
+        # Use subprocess to test stdin processing
+        import subprocess
+        result = subprocess.run(
+            ['python', 'lpv.py', '-q'],
+            input=b"line1\nline2\nline3\n",
+            capture_output=True,
+            cwd='/home/lfu/work/examples/lpv'
+        )
+        assert result.returncode == 0
+        assert result.stdout == b"line1\nline2\nline3\n"
+
+    def test_main_finalize_called(self):
+        """Test main calls progress.finalize()."""
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+            f.write("test\n")
+            temp_file = f.name
+
+        try:
+            with patch('sys.argv', ['lpv', '-q', temp_file]):
+                with patch.object(lpv.ProgressDisplay, 'finalize') as mock_finalize:
+                    lpv.main()
+                    assert mock_finalize.called
+        finally:
+            os.unlink(temp_file)
+
+    def test_main_keyboard_interrupt_in_main(self):
+        """Test main handles KeyboardInterrupt and returns 130."""
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+            f.write("line1\nline2\n")
+            temp_file = f.name
+
+        try:
+            # Mock process_stream to raise KeyboardInterrupt
+            with patch('sys.argv', ['lpv', '-q', temp_file]):
+                with patch('lpv.process_stream', side_effect=KeyboardInterrupt()):
+                    result = lpv.main()
+                    assert result == 130
+        finally:
+            os.unlink(temp_file)
+
+    def test_main_entry_point(self):
+        """Test the if __name__ == '__main__' entry point."""
+        # This tests line 271
+        import subprocess
+        result = subprocess.run(
+            ['python', 'lpv.py', '--version'],
+            capture_output=True,
+            text=True,
+            cwd='/home/lfu/work/examples/lpv'
+        )
+        assert result.returncode == 0
+        assert 'lpv' in result.stdout or 'lpv' in result.stderr
