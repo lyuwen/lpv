@@ -95,7 +95,7 @@ class TestProgressDisplay:
         progress.lines_processed = 50
         output = progress._render_progress_bar(10.0)
         assert "50%" in output
-        assert "50/100" in output
+        assert "50 lines" in output
         assert "lines/s" in output
 
     def test_render_stream_mode(self):

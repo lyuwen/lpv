@@ -27,6 +27,7 @@ class ProgressDisplay:
         self.quiet = quiet
         self.width = width or self._get_terminal_width()
         self.lines_processed = 0
+        self.bytes_processed = 0
         self.start_time = time.time()
         self.last_update = 0.0
         self.show_progress = sys.stderr.isatty() and not quiet
@@ -47,11 +48,38 @@ class ProgressDisplay:
             return f"{hours}:{minutes:02d}:{secs:02d}"
         return f"{minutes}:{secs:02d}"
 
+    def _format_bytes(self, bytes_count: int) -> str:
+        """Format bytes as human-readable size."""
+        size = float(bytes_count)
+        for unit in ['B', 'KiB', 'MiB', 'GiB', 'TiB']:
+            if size < 1024.0:
+                if unit == 'B':
+                    return f"{size:.0f}{unit}"
+                return f"{size:.1f}{unit}"
+            size /= 1024.0
+        return f"{size:.1f}PiB"
+
+    def _format_rate(self, bytes_per_sec: float) -> str:
+        """Format byte rate as human-readable throughput."""
+        for unit in ['B/s', 'KiB/s', 'MiB/s', 'GiB/s', 'TiB/s']:
+            if bytes_per_sec < 1024.0:
+                if unit == 'B/s':
+                    return f"{bytes_per_sec:.0f}{unit}"
+                return f"{bytes_per_sec:.1f}{unit}"
+            bytes_per_sec /= 1024.0
+        return f"{bytes_per_sec:.1f}PiB/s"
+
     def _calculate_rate(self, elapsed: float) -> float:
         """Calculate lines per second."""
         if elapsed < 0.001:
             return 0.0
         return self.lines_processed / elapsed
+
+    def _calculate_byte_rate(self, elapsed: float) -> float:
+        """Calculate bytes per second."""
+        if elapsed < 0.001:
+            return 0.0
+        return self.bytes_processed / elapsed
 
     def _calculate_eta(self, elapsed: float) -> Optional[float]:
         """Calculate estimated time remaining."""
@@ -70,27 +98,64 @@ class ProgressDisplay:
 
         percentage = min(100, int(100 * self.lines_processed / self.total_lines))
         rate = self._calculate_rate(elapsed)
-        eta = self._calculate_eta(elapsed)
+        byte_rate = self._calculate_byte_rate(elapsed)
 
-        # Calculate progress bar width
         prefix = f"{self.name}: " if self.name else ""
-        suffix = f" {percentage}% | {self.lines_processed}/{self.total_lines} lines | {rate:.0f} lines/s"
-        if eta is not None:
-            suffix += f" | ETA: {self._format_time(eta)}"
 
-        available_width = self.width - len(prefix) - len(suffix) - 4  # 4 for " [] "
-        bar_width = max(10, available_width)
+        # Build status parts
+        stats = f"{self.lines_processed} lines | {rate:.0f} lines/s | elapsed: {self._format_time(elapsed)}"
+        byte_info = f"{self._format_bytes(self.bytes_processed)} {self._format_time(elapsed)} [{self._format_rate(byte_rate)}]"
+        bar_suffix = f" {percentage}%"
 
-        filled = int(bar_width * self.lines_processed / self.total_lines)
-        bar = "=" * filled + ">" + " " * (bar_width - filled - 1)
+        # Calculate available width for progress bar
+        status_line = f"{prefix}{stats}    {byte_info} [{bar_suffix}"
+        available_for_bar = self.width - len(status_line) - 2  # 2 for "] "
 
-        return f"{prefix}[{bar}]{suffix}"
+        if available_for_bar < 10:
+            # Not enough space for bar, show compact format
+            return f"{prefix}{self.lines_processed} lines | {self._format_bytes(self.bytes_processed)} | {percentage}%"
+
+        # Render progress bar
+        filled = int(available_for_bar * self.lines_processed / self.total_lines)
+        bar = "=" * filled + ">" + " " * (available_for_bar - filled - 1)
+
+        result = f"{prefix}{stats}    {byte_info} [{bar}]{bar_suffix}"
+
+        # Ensure we don't exceed width
+        if len(result) > self.width:
+            result = result[:self.width]
+
+        return result
 
     def _render_stream_mode(self, elapsed: float) -> str:
         """Render progress for stream mode (unknown size)."""
         rate = self._calculate_rate(elapsed)
+        byte_rate = self._calculate_byte_rate(elapsed)
         prefix = f"{self.name}: " if self.name else ""
-        return f"{prefix}{self.lines_processed} lines | {rate:.0f} lines/s | elapsed: {self._format_time(elapsed)}"
+
+        # Build the status line with proper spacing
+        parts = [
+            f"{self.lines_processed} lines",
+            f"{rate:.0f} lines/s",
+            f"elapsed: {self._format_time(elapsed)}",
+            f"{self._format_bytes(self.bytes_processed)}",
+            f"{self._format_time(elapsed)}",
+            f"[{self._format_rate(byte_rate)}]"
+        ]
+
+        status = f"{prefix}{' | '.join(parts[:3])}    {' '.join(parts[3:])}"
+
+        # Truncate if too long
+        if len(status) > self.width:
+            # Try without byte details first
+            status = f"{prefix}{self.lines_processed} lines | {rate:.0f} lines/s | {self._format_time(elapsed)} | {self._format_bytes(self.bytes_processed)}"
+            if len(status) > self.width:
+                # Minimal format
+                status = f"{prefix}{self.lines_processed} lines | {self._format_bytes(self.bytes_processed)}"
+                if len(status) > self.width:
+                    status = status[:self.width]
+
+        return status
 
     def _render_numeric(self, elapsed: float) -> str:
         """Render numeric output for scripting."""
@@ -122,9 +187,10 @@ class ProgressDisplay:
         sys.stderr.write(f"\r{output}")
         sys.stderr.flush()
 
-    def increment(self) -> None:
-        """Increment line counter."""
+    def increment(self, byte_count: int = 0) -> None:
+        """Increment line counter and add bytes."""
         self.lines_processed += 1
+        self.bytes_processed += byte_count
 
     def finalize(self) -> None:
         """Show final statistics."""
@@ -163,7 +229,7 @@ def process_stream(input_stream: BinaryIO, output_stream: BinaryIO,
                 if buffer:
                     output_stream.write(buffer)
                     if b'\n' in buffer or buffer:
-                        progress.increment()
+                        progress.increment(len(buffer))
                         progress.update()
                 break
 
@@ -172,9 +238,10 @@ def process_stream(input_stream: BinaryIO, output_stream: BinaryIO,
             buffer = lines[-1]  # Keep incomplete line in buffer
 
             for line in lines[:-1]:
-                output_stream.write(line + b'\n')
+                line_with_newline = line + b'\n'
+                output_stream.write(line_with_newline)
                 output_stream.flush()
-                progress.increment()
+                progress.increment(len(line_with_newline))
                 progress.update()
 
     except BrokenPipeError:
