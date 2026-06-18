@@ -1,5 +1,7 @@
 # lpv - Line-counting Progress Viewer
 
+[![Unit Tests](https://github.com/lyuwen/lpv/actions/workflows/test.yml/badge.svg)](https://github.com/lyuwen/lpv/actions/workflows/test.yml)
+
 A pipe viewer that counts lines instead of bytes, similar to `pv` but line-oriented.
 
 ## Features
