@@ -31,6 +31,11 @@ class ProgressDisplay:
         self.start_time = time.time()
         self.last_update = 0.0
         self.show_progress = sys.stderr.isatty() and not quiet
+        # Calculate max width needed for line count display
+        # Allow for up to 10 digits if unknown, or actual digit count + 1
+        self.max_lines_width = len(str(total_lines)) if total_lines else 10
+        # Track the actual max width seen to handle overflow
+        self._seen_max_lines_width = self.max_lines_width
 
     def _get_terminal_width(self) -> int:
         """Get terminal width, default to 80."""
@@ -49,25 +54,25 @@ class ProgressDisplay:
         return f"{minutes}:{secs:02d}"
 
     def _format_bytes(self, bytes_count: int) -> str:
-        """Format bytes as human-readable size."""
+        """Format bytes as human-readable size with fixed width."""
         size = float(bytes_count)
         for unit in ['B', 'KiB', 'MiB', 'GiB', 'TiB']:
             if size < 1024.0:
                 if unit == 'B':
-                    return f"{size:.0f}{unit}"
-                return f"{size:.1f}{unit}"
+                    return f"{size:5.0f}{unit:>3}"
+                return f"{size:5.1f}{unit:>3}"
             size /= 1024.0
-        return f"{size:.1f}PiB"
+        return f"{size:5.1f}PiB"
 
     def _format_rate(self, bytes_per_sec: float) -> str:
-        """Format byte rate as human-readable throughput."""
+        """Format byte rate as human-readable throughput with fixed width."""
         for unit in ['B/s', 'KiB/s', 'MiB/s', 'GiB/s', 'TiB/s']:
             if bytes_per_sec < 1024.0:
                 if unit == 'B/s':
-                    return f"{bytes_per_sec:.0f}{unit}"
-                return f"{bytes_per_sec:.1f}{unit}"
+                    return f"{bytes_per_sec:5.0f}{unit:>5}"
+                return f"{bytes_per_sec:5.1f}{unit:>5}"
             bytes_per_sec /= 1024.0
-        return f"{bytes_per_sec:.1f}PiB/s"
+        return f"{bytes_per_sec:5.1f}PiB/s"
 
     def _calculate_rate(self, elapsed: float) -> float:
         """Calculate lines per second."""
@@ -91,6 +96,33 @@ class ProgressDisplay:
         remaining = self.total_lines - self.lines_processed
         return remaining / rate
 
+    def _format_number_fixed(self, value: int, width: int) -> str:
+        """Format a number with fixed width, handling overflow gracefully."""
+        s = str(value)
+        if len(s) <= width:
+            return s.rjust(width)
+        # Update the seen max width for future renders
+        self._seen_max_lines_width = max(self._seen_max_lines_width, len(s))
+        # If overflow, still right-align but it will expand
+        return s.rjust(width)
+
+    def _format_rate_fixed(self, rate: float, width: int = 5) -> str:
+        """Format a rate with fixed width, handling overflow gracefully."""
+        s = f"{rate:.0f}"
+        if len(s) <= width:
+            return s.rjust(width)
+        # If overflow, use compact notation
+        if rate >= 1e6:
+            compact = f"{rate/1e6:.1f}M"
+            if len(compact) <= width:
+                return compact.rjust(width)
+        elif rate >= 1e3:
+            compact = f"{rate/1e3:.1f}K"
+            if len(compact) <= width:
+                return compact.rjust(width)
+        # Last resort: show as-is (will exceed width)
+        return s.rjust(width)
+
     def _render_progress_bar(self, elapsed: float) -> str:
         """Render progress bar for known-size mode."""
         if not self.total_lines:
@@ -102,24 +134,42 @@ class ProgressDisplay:
 
         prefix = f"{self.name}: " if self.name else ""
 
-        # Build status parts
-        stats = f"{self.lines_processed} lines | {rate:.0f} lines/s | elapsed: {self._format_time(elapsed)}"
-        byte_info = f"{self._format_bytes(self.bytes_processed)} {self._format_time(elapsed)} [{self._format_rate(byte_rate)}]"
-        bar_suffix = f" {percentage}%"
+        # Build status parts with fixed-width fields using overflow-safe helpers
+        lines_str = self._format_number_fixed(self.lines_processed, self.max_lines_width)
+        rate_str = self._format_rate_fixed(rate, 5)
+        time_str = self._format_time(elapsed)
+        bytes_str = self._format_bytes(self.bytes_processed)
+        rate_bytes_str = self._format_rate(byte_rate)
+
+        # Format: "N lines R/s T | B [R] [====>  ] P%"
+        # More compact: combine rates with their values
+        stats = f"{lines_str} {rate_str}/s {time_str}"
+        byte_info = f"{bytes_str} [{rate_bytes_str}]"
+        bar_suffix = f" {percentage:3d}%"
 
         # Calculate available width for progress bar
-        status_line = f"{prefix}{stats}    {byte_info} [{bar_suffix}"
-        available_for_bar = self.width - len(status_line) - 2  # 2 for "] "
+        prefix_len = len(prefix)
+        stats_len = len(stats)
+        byte_info_len = len(byte_info)
+        bar_suffix_len = len(bar_suffix)
+
+        # Format: "{prefix}{stats} | {byte_info} [{bar}]{bar_suffix}"
+        status_line_len = prefix_len + stats_len + 3 + byte_info_len + 3 + bar_suffix_len  # " | ", " [" and "]"
+        available_for_bar = self.width - status_line_len
 
         if available_for_bar < 10:
             # Not enough space for bar, show compact format
-            return f"{prefix}{self.lines_processed} lines | {self._format_bytes(self.bytes_processed)} | {percentage}%"
+            compact = f"{prefix}{lines_str} {rate_str}/s {time_str} | {bytes_str} {percentage:3d}%"
+            if len(compact) <= self.width:
+                return compact
+            # Ultra-compact if still too long
+            return f"{prefix}{lines_str} {bytes_str} {percentage:3d}%"
 
         # Render progress bar
         filled = int(available_for_bar * self.lines_processed / self.total_lines)
         bar = "=" * filled + ">" + " " * (available_for_bar - filled - 1)
 
-        result = f"{prefix}{stats}    {byte_info} [{bar}]{bar_suffix}"
+        result = f"{prefix}{stats} | {byte_info} [{bar}]{bar_suffix}"
 
         # Ensure we don't exceed width
         if len(result) > self.width:
@@ -133,10 +183,12 @@ class ProgressDisplay:
         byte_rate = self._calculate_byte_rate(elapsed)
         prefix = f"{self.name}: " if self.name else ""
 
-        # Build the status line with proper spacing
+        # Build the status line with proper spacing and fixed-width fields using overflow-safe helpers
+        lines_str = self._format_number_fixed(self.lines_processed, 10)
+        rate_str = self._format_rate_fixed(rate, 6)
         parts = [
-            f"{self.lines_processed} lines",
-            f"{rate:.0f} lines/s",
+            f"{lines_str} lines",
+            f"{rate_str} lines/s",
             f"elapsed: {self._format_time(elapsed)}",
             f"{self._format_bytes(self.bytes_processed)}",
             f"{self._format_time(elapsed)}",
@@ -148,10 +200,10 @@ class ProgressDisplay:
         # Truncate if too long
         if len(status) > self.width:
             # Try without byte details first
-            status = f"{prefix}{self.lines_processed} lines | {rate:.0f} lines/s | {self._format_time(elapsed)} | {self._format_bytes(self.bytes_processed)}"
+            status = f"{prefix}{lines_str} lines | {rate_str} lines/s | {self._format_time(elapsed)} | {self._format_bytes(self.bytes_processed)}"
             if len(status) > self.width:
                 # Minimal format
-                status = f"{prefix}{self.lines_processed} lines | {self._format_bytes(self.bytes_processed)}"
+                status = f"{prefix}{lines_str} lines | {self._format_bytes(self.bytes_processed)}"
                 if len(status) > self.width:
                     status = status[:self.width]
 
@@ -184,7 +236,10 @@ class ProgressDisplay:
         else:
             output = self._render_stream_mode(elapsed)
 
-        sys.stderr.write(f"\r{output}")
+        # Pad output to terminal width to maintain consistent size
+        # This prevents display flickering from varying digit counts
+        padded_output = output.ljust(self.width)
+        sys.stderr.write(f"\r{padded_output}")
         sys.stderr.flush()
 
     def increment(self, byte_count: int = 0) -> None:
@@ -200,6 +255,27 @@ class ProgressDisplay:
         self.update(force=True)
         sys.stderr.write("\n")
         sys.stderr.flush()
+
+    def show_initial(self) -> None:
+        """Show initial progress state before any data arrives."""
+        if not self.show_progress:
+            return
+
+        # Show initial state with zero values
+        elapsed = 0.0
+
+        if self.numeric:
+            output = self._render_numeric(elapsed)
+        elif self.total_lines:
+            output = self._render_progress_bar(elapsed)
+        else:
+            output = self._render_stream_mode(elapsed)
+
+        # Pad output to terminal width
+        padded_output = output.ljust(self.width)
+        sys.stderr.write(f"\r{padded_output}")
+        sys.stderr.flush()
+        self.last_update = time.time()
 
 
 def count_lines_in_file(filepath: str) -> Optional[int]:
@@ -308,6 +384,9 @@ Examples:
         quiet=args.quiet,
         width=args.width
     )
+
+    # Show initial state before data arrives
+    progress.show_initial()
 
     # Handle SIGPIPE gracefully
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
