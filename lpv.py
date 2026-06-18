@@ -18,6 +18,10 @@ __version__ = "0.1.0"
 class ProgressDisplay:
     """Handles progress display on stderr."""
 
+    # ANSI escape codes for cursor control
+    HIDE_CURSOR = '\033[?25l'
+    SHOW_CURSOR = '\033[?25h'
+
     def __init__(self, total_lines: Optional[int], interval: float,
                  numeric: bool, name: Optional[str], quiet: bool, width: Optional[int]):
         self.total_lines = total_lines
@@ -253,13 +257,18 @@ class ProgressDisplay:
             return
 
         self.update(force=True)
-        sys.stderr.write("\n")
+        # Show cursor again and move to new line
+        sys.stderr.write(f"{self.SHOW_CURSOR}\n")
         sys.stderr.flush()
 
     def show_initial(self) -> None:
         """Show initial progress state before any data arrives."""
         if not self.show_progress:
             return
+
+        # Hide cursor
+        sys.stderr.write(self.HIDE_CURSOR)
+        sys.stderr.flush()
 
         # Show initial state with zero values
         elapsed = 0.0
