@@ -398,11 +398,14 @@ class TestMainLogic:
         """Test main processes stdin correctly."""
         # Use subprocess to test stdin processing
         import subprocess
+        import os
+        # Get the directory containing lpv.py (project root)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         result = subprocess.run(
             ['python', 'lpv.py', '-q'],
             input=b"line1\nline2\nline3\n",
             capture_output=True,
-            cwd='/home/lfu/work/examples/lpv'
+            cwd=project_root
         )
         assert result.returncode == 0
         assert result.stdout == b"line1\nline2\nline3\n"
@@ -440,11 +443,14 @@ class TestMainLogic:
         """Test the if __name__ == '__main__' entry point."""
         # This tests line 271
         import subprocess
+        import os
+        # Get the directory containing lpv.py (project root)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         result = subprocess.run(
             ['python', 'lpv.py', '--version'],
             capture_output=True,
             text=True,
-            cwd='/home/lfu/work/examples/lpv'
+            cwd=project_root
         )
         assert result.returncode == 0
         assert 'lpv' in result.stdout or 'lpv' in result.stderr
